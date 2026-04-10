@@ -3,6 +3,12 @@ book/
 .envrc.local
 .DS_Store
 result
+__pycache__/
+.pytest_cache/
+
+ebook/note_*.md
+ebook/README.md
+ebook/SUMMARY.md
 
 transcripts/**
 !transcripts/.keep

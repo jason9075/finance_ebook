@@ -20,6 +20,8 @@
             jq
             just
             mdbook
+            python311
+            python311Packages.tqdm
           ];
 
           shellHook = ''
