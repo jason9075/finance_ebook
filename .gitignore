@@ -13,3 +13,5 @@ ebook/SUMMARY.md
 
 transcripts/**
 !transcripts/.keep
+
+.env

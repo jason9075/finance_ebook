@@ -18,7 +18,11 @@ try:
 except ModuleNotFoundError:
     tqdm = None
 
-DEFAULT_MODEL = "gemini-3.1-pro-preview"
+DEFAULT_BACKEND = "codex"
+DEFAULT_MODEL_BY_BACKEND = {
+    "gemini": "gemini-3.1-pro-preview",
+    "codex": "gpt-5.4",
+}
 DEFAULT_WORKERS = 4
 
 
@@ -29,7 +33,11 @@ README_TEMPLATE = """# 財經逐字稿每日重點
 ## 使用方式
 
 ```bash
-PYTHONPATH=src python -m finance_ebook --limit 5
+BACKEND=codex PYTHONPATH=src python -m finance_ebook --limit 5
+BACKEND=gemini PYTHONPATH=src python -m finance_ebook --limit 5
+just generate 5
+just generate 5 gpt-5.4 8
+just generate 5 gemini-3.1-pro-preview 8
 mdbook serve
 ```
 
@@ -38,7 +46,9 @@ mdbook serve
 - 每篇 `note_YYYYMMDD.md` 對應一天的逐字稿重點。
 - `SUMMARY.md` 會依日期自動更新。
 - 預設會跳過已存在的筆記；若要重跑已產生的檔案，加入 `--force`。
-- 預設 model 為 `gemini-3.1-pro-preview`；可用 `--model` 或 `GEMINI_MODEL` 覆寫。
+- 預設 backend 為 `codex`，可用 `BACKEND` 切換為 `gemini`。
+- `codex` 預設 model 為 `gpt-5.4`，`gemini` 預設 model 為 `gemini-3.1-pro-preview`。
+- 根目錄 `.env` 會在啟動時自動載入。
 - 預設使用 `4` 個平行 worker；可用 `--workers` 或 `GEMINI_WORKERS` 覆寫。
 """
 
@@ -49,6 +59,7 @@ class Config:
     transcripts_dir: Path
     ebook_dir: Path
     logs_dir: Path
+    backend: str
     model: str
     workers: int
     limit: int | None
@@ -69,7 +80,25 @@ class GenerationStatus(str, Enum):
     RATE_LIMITED = "rate_limited"
 
 
+def load_dotenv(dotenv_path: Path) -> None:
+    if not dotenv_path.exists():
+        return
+    for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        os.environ.setdefault(key, value)
+
+
+def default_model_for_backend(backend: str) -> str:
+    return DEFAULT_MODEL_BY_BACKEND.get(backend, DEFAULT_MODEL_BY_BACKEND[DEFAULT_BACKEND])
+
+
 def build_parser() -> argparse.ArgumentParser:
+    env_backend = os.environ.get("BACKEND", DEFAULT_BACKEND).strip().lower() or DEFAULT_BACKEND
     parser = argparse.ArgumentParser(
         prog="finance_ebook",
         description="Generate daily mdBook notes from transcript JSON files.",
@@ -90,15 +119,22 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-m",
         "--model",
-        default=os.environ.get("GEMINI_MODEL", DEFAULT_MODEL),
-        help=f"Gemini model name. Defaults to GEMINI_MODEL or {DEFAULT_MODEL}.",
+        default=os.environ.get("MODEL", os.environ.get("GEMINI_MODEL", default_model_for_backend(env_backend))),
+        help="Model name. Defaults to MODEL, then backend-specific defaults.",
+    )
+    parser.add_argument(
+        "-b",
+        "--backend",
+        choices=["gemini", "codex"],
+        default=env_backend,
+        help=f"LLM backend. Defaults to BACKEND or {DEFAULT_BACKEND}.",
     )
     parser.add_argument(
         "-w",
         "--workers",
         type=positive_int,
-        default=int(os.environ.get("GEMINI_WORKERS", str(DEFAULT_WORKERS))),
-        help=f"Parallel worker count. Defaults to GEMINI_WORKERS or {DEFAULT_WORKERS}.",
+        default=int(os.environ.get("WORKERS", os.environ.get("GEMINI_WORKERS", str(DEFAULT_WORKERS)))),
+        help=f"Parallel worker count. Defaults to WORKERS or {DEFAULT_WORKERS}.",
     )
     parser.add_argument(
         "--refresh-summary",
@@ -129,6 +165,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         transcripts_dir=Path(os.environ.get("TRANSCRIPTS_DIR", root_dir / "transcripts")),
         ebook_dir=Path(os.environ.get("EBOOK_DIR", root_dir / "ebook")),
         logs_dir=root_dir / "logs",
+        backend=args.backend.strip(),
         model=args.model.strip(),
         workers=args.workers,
         limit=args.limit,
@@ -138,8 +175,9 @@ def resolve_config(args: argparse.Namespace) -> Config:
 
 
 def ensure_requirements(config: Config) -> None:
-    if shutil.which("gemini") is None:
-        raise SystemExit("Missing required command: gemini")
+    command = config.backend
+    if shutil.which(command) is None:
+        raise SystemExit(f"Missing required command: {command}")
     if not config.transcripts_dir.is_dir():
         raise SystemExit(f"Transcript directory not found: {config.transcripts_dir}")
 
@@ -242,16 +280,24 @@ def is_rate_limited(stderr: str, stdout: str) -> bool:
     return any(pattern in haystack for pattern in patterns)
 
 
+def build_backend_command(backend: str, model: str, prompt: str) -> list[str]:
+    if backend == "codex":
+        return ["codex", "-m", model, "exec", prompt]
+    return ["gemini", "-m", model, "-p", prompt]
+
+
 def generate_note(
     entry: DailyTranscript,
     note_path: Path,
+    backend: str,
     model: str,
     log_file: Path,
     log_lock: Lock,
 ) -> GenerationStatus:
     prompt = f"{build_prompt(entry.date, entry.title)}\n\n{entry.text}"
+    command = build_backend_command(backend, model, prompt)
     completed = subprocess.run(
-        ["gemini", "-m", model, "-p", prompt],
+        command,
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -270,8 +316,10 @@ def generate_note(
             log_file,
             "\n".join(
                 [
-                    f"[{entry.date}] gemini command {status.value}",
+                    f"[{entry.date}] {backend} command {status.value}",
+                    f"backend: {backend}",
                     f"model: {model}",
+                    f"command: {' '.join(command[:4])}",
                     f"note: {note_path}",
                     f"returncode: {completed.returncode}",
                     "",
@@ -298,7 +346,7 @@ def process_entry(
     log_lock: Lock,
 ) -> tuple[str, GenerationStatus]:
     try:
-        status = generate_note(entry, note_path, config.model, log_file, log_lock)
+        status = generate_note(entry, note_path, config.backend, config.model, log_file, log_lock)
         return entry.date, status
     except Exception:
         append_log(
@@ -369,8 +417,10 @@ def build_homepage(config: Config) -> None:
         "## 使用方式",
         "",
         "```bash",
-        "PYTHONPATH=src python -m finance_ebook --limit 5",
+        "BACKEND=codex PYTHONPATH=src python -m finance_ebook --limit 5",
+        "BACKEND=gemini PYTHONPATH=src python -m finance_ebook --limit 5",
         "just generate 5",
+        "just generate 5 gpt-5.4 8",
         "just generate 5 gemini-3.1-pro-preview 8",
         "mdbook serve",
         "```",
@@ -484,6 +534,8 @@ def run(config: Config) -> int:
 
 
 def main() -> int:
+    root_dir = Path(__file__).resolve().parents[2]
+    load_dotenv(root_dir / ".env")
     parser = build_parser()
     args = parser.parse_args()
     config = resolve_config(args)
