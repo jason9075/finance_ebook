@@ -5,6 +5,7 @@ book/
 result
 __pycache__/
 .pytest_cache/
+logs/
 
 ebook/note_*.md
 ebook/README.md

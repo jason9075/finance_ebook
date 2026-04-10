@@ -13,7 +13,7 @@ generate limit="" model="gemini-3.1-pro-preview":
   if [[ -z "$MODEL" ]]; then \
     MODEL="${GEMINI_MODEL:-}"; \
   fi; \
-  PYTHONPATH=src "$PYTHON_BIN" -m finance_ebook {{ if limit != "" { "--limit " + limit } else { "" } }} --model "$MODEL";
+  PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -m finance_ebook {{ if limit != "" { "--limit " + limit } else { "" } }} --model "$MODEL";
 
 regenerate limit="" model="gemini-3.1-pro-preview":
   PYTHON_BIN="$(command -v python3 || command -v python || true)"; \
@@ -25,7 +25,7 @@ regenerate limit="" model="gemini-3.1-pro-preview":
   if [[ -z "$MODEL" ]]; then \
     MODEL="${GEMINI_MODEL:-}"; \
   fi; \
-  PYTHONPATH=src "$PYTHON_BIN" -m finance_ebook {{ if limit != "" { "--limit " + limit } else { "" } }} --force --model "$MODEL";
+  PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -m finance_ebook {{ if limit != "" { "--limit " + limit } else { "" } }} --force --model "$MODEL";
 
 serve:
   mdbook serve

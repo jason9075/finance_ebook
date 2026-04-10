@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import argparse
 import json
+import traceback
 import os
 import shutil
 import subprocess
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
 try:
@@ -41,6 +43,7 @@ class Config:
     root_dir: Path
     transcripts_dir: Path
     ebook_dir: Path
+    logs_dir: Path
     model: str
     limit: int | None
     force: bool
@@ -93,6 +96,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         root_dir=root_dir,
         transcripts_dir=Path(os.environ.get("TRANSCRIPTS_DIR", root_dir / "transcripts")),
         ebook_dir=Path(os.environ.get("EBOOK_DIR", root_dir / "ebook")),
+        logs_dir=root_dir / "logs",
         model=args.model.strip(),
         limit=args.limit,
         force=args.force,
@@ -108,6 +112,7 @@ def ensure_requirements(config: Config) -> None:
 
 def init_ebook(config: Config) -> None:
     config.ebook_dir.mkdir(parents=True, exist_ok=True)
+    config.logs_dir.mkdir(parents=True, exist_ok=True)
     book_toml = config.root_dir / "book.toml"
     if not book_toml.exists():
         book_toml.write_text(
@@ -129,7 +134,7 @@ def init_ebook(config: Config) -> None:
 
 
 def iter_transcript_files(config: Config) -> list[Path]:
-    return sorted(config.transcripts_dir.glob("*.txt"))
+    return sorted(config.transcripts_dir.glob("*.txt"), reverse=True)
 
 
 def iter_daily_transcripts(transcript_file: Path) -> list[DailyTranscript]:
@@ -178,7 +183,23 @@ def build_prompt(date: str, title: str) -> str:
 """
 
 
-def generate_note(entry: DailyTranscript, note_path: Path, model: str) -> bool:
+def make_log_file(config: Config) -> Path:
+    timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    return config.logs_dir / f"generate-{timestamp}.log"
+
+
+def append_log(log_file: Path, message: str) -> None:
+    with log_file.open("a", encoding="utf-8") as handle:
+        handle.write(message.rstrip())
+        handle.write("\n\n")
+
+
+def generate_note(
+    entry: DailyTranscript,
+    note_path: Path,
+    model: str,
+    log_file: Path,
+) -> bool:
     prompt = f"{build_prompt(entry.date, entry.title)}\n\n{entry.text}"
     completed = subprocess.run(
         ["gemini", "-m", model, "-p", prompt],
@@ -191,6 +212,23 @@ def generate_note(entry: DailyTranscript, note_path: Path, model: str) -> bool:
     if completed.returncode != 0:
         if note_path.exists():
             note_path.unlink()
+        append_log(
+            log_file,
+            "\n".join(
+                [
+                    f"[{entry.date}] gemini command failed",
+                    f"model: {model}",
+                    f"note: {note_path}",
+                    f"returncode: {completed.returncode}",
+                    "",
+                    "stderr:",
+                    completed.stderr.strip() or "(empty)",
+                    "",
+                    "stdout:",
+                    completed.stdout.strip() or "(empty)",
+                ]
+            ),
+        )
         return False
 
     note_path.write_text(completed.stdout, encoding="utf-8")
@@ -213,7 +251,7 @@ def collect_entries(config: Config) -> tuple[list[tuple[DailyTranscript, Path]],
 
 
 def note_files(config: Config) -> list[Path]:
-    return sorted(config.ebook_dir.glob("note_*.md"))
+    return sorted(config.ebook_dir.glob("note_*.md"), reverse=True)
 
 
 def note_link_label(note_file: Path) -> str:
@@ -270,8 +308,10 @@ def run(config: Config) -> int:
     ensure_requirements(config)
     init_ebook(config)
 
+    log_file = make_log_file(config)
     queued, skipped = collect_entries(config)
     attempted = 0
+    errors = 0
 
     if not queued:
         build_summary(config)
@@ -283,19 +323,55 @@ def run(config: Config) -> int:
         for entry, note_path in queued:
             print(f"write {entry.date}")
             attempted += 1
-            if not generate_note(entry, note_path, config.model):
-                print(f"error {entry.date}")
+            try:
+                if not generate_note(entry, note_path, config.model, log_file):
+                    errors += 1
+                    print(f"error {entry.date} log={log_file}")
+            except Exception:
+                errors += 1
+                append_log(
+                    log_file,
+                    "\n".join(
+                        [
+                            f"[{entry.date}] unexpected exception",
+                            f"note: {note_path}",
+                            "",
+                            traceback.format_exc().rstrip(),
+                        ]
+                    ),
+                )
+                print(f"error {entry.date} log={log_file}")
     else:
         progress = tqdm(queued, desc="Generating notes", unit="note")
         for entry, note_path in progress:
             progress.set_postfix_str(entry.date)
             attempted += 1
-            if not generate_note(entry, note_path, config.model):
-                tqdm.write(f"error {entry.date}")
+            try:
+                if not generate_note(entry, note_path, config.model, log_file):
+                    errors += 1
+                    tqdm.write(f"error {entry.date} log={log_file}")
+            except Exception:
+                errors += 1
+                append_log(
+                    log_file,
+                    "\n".join(
+                        [
+                            f"[{entry.date}] unexpected exception",
+                            f"note: {note_path}",
+                            "",
+                            traceback.format_exc().rstrip(),
+                        ]
+                    ),
+                )
+                tqdm.write(f"error {entry.date} log={log_file}")
 
     build_summary(config)
     build_homepage(config)
-    print(f"done  attempted={attempted} skipped={skipped} ebook={config.ebook_dir}")
+    if errors == 0 and log_file.exists():
+        log_file.unlink()
+    print(
+        f"done  attempted={attempted} skipped={skipped} errors={errors} ebook={config.ebook_dir}"
+    )
     return 0
 
 
