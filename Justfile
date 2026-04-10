@@ -41,6 +41,14 @@ serve:
 build:
   mdbook build
 
+refresh-summary:
+  PYTHON_BIN="$(command -v python3 || command -v python || true)"; \
+  if [[ -z "$PYTHON_BIN" ]]; then \
+    echo "Missing required command: python3 (or python)" >&2; \
+    exit 1; \
+  fi; \
+  PYTHONPATH="src${PYTHONPATH:+:$PYTHONPATH}" "$PYTHON_BIN" -m finance_ebook --refresh-summary;
+
 clean:
   rm -rf book
   rm -f ebook/note_*.md

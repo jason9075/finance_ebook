@@ -53,6 +53,7 @@ class Config:
     workers: int
     limit: int | None
     force: bool
+    refresh_summary: bool
 
 
 @dataclass(slots=True)
@@ -99,6 +100,11 @@ def build_parser() -> argparse.ArgumentParser:
         default=int(os.environ.get("GEMINI_WORKERS", str(DEFAULT_WORKERS))),
         help=f"Parallel worker count. Defaults to GEMINI_WORKERS or {DEFAULT_WORKERS}.",
     )
+    parser.add_argument(
+        "--refresh-summary",
+        action="store_true",
+        help="Only rebuild README.md and SUMMARY.md from existing notes.",
+    )
     return parser
 
 
@@ -127,6 +133,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         workers=args.workers,
         limit=args.limit,
         force=args.force,
+        refresh_summary=args.refresh_summary,
     )
 
 
@@ -380,8 +387,15 @@ def build_homepage(config: Config) -> None:
 
 
 def run(config: Config) -> int:
-    ensure_requirements(config)
     init_ebook(config)
+
+    if config.refresh_summary:
+        build_summary(config)
+        build_homepage(config)
+        print(f"done  refreshed=1 ebook={config.ebook_dir}")
+        return 0
+
+    ensure_requirements(config)
 
     log_file = make_log_file(config)
     log_lock = Lock()
