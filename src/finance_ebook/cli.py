@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import argparse
 import json
-import traceback
 import os
 import shutil
 import subprocess
+import traceback
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
+from threading import Lock
 
 try:
     from tqdm import tqdm
@@ -16,6 +19,7 @@ except ModuleNotFoundError:
     tqdm = None
 
 DEFAULT_MODEL = "gemini-3.1-pro-preview"
+DEFAULT_WORKERS = 4
 
 
 README_TEMPLATE = """# 財經逐字稿每日重點
@@ -35,6 +39,7 @@ mdbook serve
 - `SUMMARY.md` 會依日期自動更新。
 - 預設會跳過已存在的筆記；若要重跑已產生的檔案，加入 `--force`。
 - 預設 model 為 `gemini-3.1-pro-preview`；可用 `--model` 或 `GEMINI_MODEL` 覆寫。
+- 預設使用 `4` 個平行 worker；可用 `--workers` 或 `GEMINI_WORKERS` 覆寫。
 """
 
 
@@ -45,6 +50,7 @@ class Config:
     ebook_dir: Path
     logs_dir: Path
     model: str
+    workers: int
     limit: int | None
     force: bool
 
@@ -54,6 +60,12 @@ class DailyTranscript:
     date: str
     title: str
     text: str
+
+
+class GenerationStatus(str, Enum):
+    SUCCESS = "success"
+    FAILED = "failed"
+    RATE_LIMITED = "rate_limited"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -80,6 +92,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.environ.get("GEMINI_MODEL", DEFAULT_MODEL),
         help=f"Gemini model name. Defaults to GEMINI_MODEL or {DEFAULT_MODEL}.",
     )
+    parser.add_argument(
+        "-w",
+        "--workers",
+        type=positive_int,
+        default=int(os.environ.get("GEMINI_WORKERS", str(DEFAULT_WORKERS))),
+        help=f"Parallel worker count. Defaults to GEMINI_WORKERS or {DEFAULT_WORKERS}.",
+    )
     return parser
 
 
@@ -87,6 +106,13 @@ def non_negative_int(raw: str) -> int:
     value = int(raw)
     if value < 0:
         raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return value
+
+
+def positive_int(raw: str) -> int:
+    value = int(raw)
+    if value <= 0:
+        raise argparse.ArgumentTypeError("must be a positive integer")
     return value
 
 
@@ -98,6 +124,7 @@ def resolve_config(args: argparse.Namespace) -> Config:
         ebook_dir=Path(os.environ.get("EBOOK_DIR", root_dir / "ebook")),
         logs_dir=root_dir / "logs",
         model=args.model.strip(),
+        workers=args.workers,
         limit=args.limit,
         force=args.force,
     )
@@ -188,10 +215,24 @@ def make_log_file(config: Config) -> Path:
     return config.logs_dir / f"generate-{timestamp}.log"
 
 
-def append_log(log_file: Path, message: str) -> None:
-    with log_file.open("a", encoding="utf-8") as handle:
-        handle.write(message.rstrip())
-        handle.write("\n\n")
+def append_log(log_file: Path, message: str, log_lock: Lock) -> None:
+    with log_lock:
+        with log_file.open("a", encoding="utf-8") as handle:
+            handle.write(message.rstrip())
+            handle.write("\n\n")
+
+
+def is_rate_limited(stderr: str, stdout: str) -> bool:
+    haystack = f"{stderr}\n{stdout}".lower()
+    patterns = [
+        "rate limit",
+        "rate_limit",
+        "too many requests",
+        "resource has been exhausted",
+        "quota exceeded",
+        "429",
+    ]
+    return any(pattern in haystack for pattern in patterns)
 
 
 def generate_note(
@@ -199,7 +240,8 @@ def generate_note(
     note_path: Path,
     model: str,
     log_file: Path,
-) -> bool:
+    log_lock: Lock,
+) -> GenerationStatus:
     prompt = f"{build_prompt(entry.date, entry.title)}\n\n{entry.text}"
     completed = subprocess.run(
         ["gemini", "-m", model, "-p", prompt],
@@ -212,11 +254,16 @@ def generate_note(
     if completed.returncode != 0:
         if note_path.exists():
             note_path.unlink()
+        status = (
+            GenerationStatus.RATE_LIMITED
+            if is_rate_limited(completed.stderr, completed.stdout)
+            else GenerationStatus.FAILED
+        )
         append_log(
             log_file,
             "\n".join(
                 [
-                    f"[{entry.date}] gemini command failed",
+                    f"[{entry.date}] gemini command {status.value}",
                     f"model: {model}",
                     f"note: {note_path}",
                     f"returncode: {completed.returncode}",
@@ -228,11 +275,38 @@ def generate_note(
                     completed.stdout.strip() or "(empty)",
                 ]
             ),
+            log_lock,
         )
-        return False
+        return status
 
     note_path.write_text(completed.stdout, encoding="utf-8")
-    return True
+    return GenerationStatus.SUCCESS
+
+
+def process_entry(
+    entry: DailyTranscript,
+    note_path: Path,
+    config: Config,
+    log_file: Path,
+    log_lock: Lock,
+) -> tuple[str, GenerationStatus]:
+    try:
+        status = generate_note(entry, note_path, config.model, log_file, log_lock)
+        return entry.date, status
+    except Exception:
+        append_log(
+            log_file,
+            "\n".join(
+                [
+                    f"[{entry.date}] unexpected exception",
+                    f"note: {note_path}",
+                    "",
+                    traceback.format_exc().rstrip(),
+                ]
+            ),
+            log_lock,
+        )
+        return entry.date, GenerationStatus.FAILED
 
 
 def collect_entries(config: Config) -> tuple[list[tuple[DailyTranscript, Path]], int]:
@@ -290,6 +364,7 @@ def build_homepage(config: Config) -> None:
         "```bash",
         "PYTHONPATH=src python -m finance_ebook --limit 5",
         "just generate 5",
+        "just generate 5 gemini-3.1-pro-preview 8",
         "mdbook serve",
         "```",
         "",
@@ -309,9 +384,11 @@ def run(config: Config) -> int:
     init_ebook(config)
 
     log_file = make_log_file(config)
+    log_lock = Lock()
     queued, skipped = collect_entries(config)
     attempted = 0
     errors = 0
+    rate_limited = False
 
     if not queued:
         build_summary(config)
@@ -319,58 +396,75 @@ def run(config: Config) -> int:
         print(f"done  attempted=0 skipped={skipped} ebook={config.ebook_dir}")
         return 0
 
-    if tqdm is None:
-        for entry, note_path in queued:
-            print(f"write {entry.date}")
-            attempted += 1
+    progress = tqdm(total=len(queued), desc="Generating notes", unit="note") if tqdm else None
+    max_workers = min(config.workers, len(queued))
+
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        queue_iter = iter(queued)
+        in_flight = {}
+
+        for _ in range(max_workers):
             try:
-                if not generate_note(entry, note_path, config.model, log_file):
+                entry, note_path = next(queue_iter)
+            except StopIteration:
+                break
+            future = executor.submit(process_entry, entry, note_path, config, log_file, log_lock)
+            in_flight[future] = entry.date
+
+        while in_flight:
+            done, _ = wait(in_flight.keys(), return_when=FIRST_COMPLETED)
+            for future in done:
+                date = in_flight.pop(future)
+                completed_date, status = future.result()
+                attempted += 1
+                if progress is None:
+                    print(f"write {completed_date}")
+                else:
+                    progress.set_postfix_str(date)
+                    progress.update(1)
+
+                if status != GenerationStatus.SUCCESS:
                     errors += 1
-                    print(f"error {entry.date} log={log_file}")
-            except Exception:
-                errors += 1
-                append_log(
+                    if progress is None:
+                        print(f"error {completed_date} log={log_file}")
+                    else:
+                        tqdm.write(f"error {completed_date} log={log_file}")
+
+                if status == GenerationStatus.RATE_LIMITED:
+                    rate_limited = True
+                    if progress is None:
+                        print("rate limit detected, stopping new submissions")
+                    else:
+                        tqdm.write("rate limit detected, stopping new submissions")
+
+                if rate_limited:
+                    continue
+
+                try:
+                    next_entry, next_note_path = next(queue_iter)
+                except StopIteration:
+                    continue
+                next_future = executor.submit(
+                    process_entry,
+                    next_entry,
+                    next_note_path,
+                    config,
                     log_file,
-                    "\n".join(
-                        [
-                            f"[{entry.date}] unexpected exception",
-                            f"note: {note_path}",
-                            "",
-                            traceback.format_exc().rstrip(),
-                        ]
-                    ),
+                    log_lock,
                 )
-                print(f"error {entry.date} log={log_file}")
-    else:
-        progress = tqdm(queued, desc="Generating notes", unit="note")
-        for entry, note_path in progress:
-            progress.set_postfix_str(entry.date)
-            attempted += 1
-            try:
-                if not generate_note(entry, note_path, config.model, log_file):
-                    errors += 1
-                    tqdm.write(f"error {entry.date} log={log_file}")
-            except Exception:
-                errors += 1
-                append_log(
-                    log_file,
-                    "\n".join(
-                        [
-                            f"[{entry.date}] unexpected exception",
-                            f"note: {note_path}",
-                            "",
-                            traceback.format_exc().rstrip(),
-                        ]
-                    ),
-                )
-                tqdm.write(f"error {entry.date} log={log_file}")
+                in_flight[next_future] = next_entry.date
+
+    if progress is not None:
+        progress.close()
 
     build_summary(config)
     build_homepage(config)
     if errors == 0 and log_file.exists():
         log_file.unlink()
+    elif rate_limited:
+        append_log(log_file, "[run] stopped early due to rate limit", log_lock)
     print(
-        f"done  attempted={attempted} skipped={skipped} errors={errors} ebook={config.ebook_dir}"
+        f"done  attempted={attempted} skipped={skipped} errors={errors} rate_limited={int(rate_limited)} ebook={config.ebook_dir}"
     )
     return 0
 
