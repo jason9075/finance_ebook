@@ -35,3 +35,5 @@ build:
 
 clean:
   rm -rf book
+  rm -f ebook/note_*.md
+  rm -f ebook/README.md ebook/SUMMARY.md

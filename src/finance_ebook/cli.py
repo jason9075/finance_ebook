@@ -159,16 +159,17 @@ def build_prompt(date: str, title: str) -> str:
 
 要求：
 1. 使用繁體中文（台灣用語）。
-2. 第一行標題固定為：# {date} 財經重點整理
-3. 第二段使用 `> ` blockquote 寫一段 120-180 字的「今日總覽」，先交代大盤主軸、風險焦點與最重要的市場變化。
-4. 接著輸出 `## 核心關鍵字`，列出 3-5 個最重要主題，每點只寫關鍵詞或短語。
-5. 接著輸出 `## 重點整理`，列出 4-6 點；每點使用 `### ` 小標，並用 2-4 句說明具體事實、因果與講者觀點。
-6. 若逐字稿內有明確數字、資產價格、經濟數據或產業指標，再輸出 `## 市場數據與動態`，以條列方式整理；若沒有明確數據，可省略此節。
-7. 最後一定要輸出 `## 市場觀察` 與 `## 後續關注` 兩節，各用 2-4 個條列說明。
-8. 請優先保留對投資判斷有用的內容，並清楚區分已發生的事實與講者的推論或預測。
-9. 請移除講者名稱、主持人口吻、對話輪次與人物標記，改寫成不帶講者識別的書面整理；只有在人物身分本身構成分析重點時才保留。
-10. 如果逐字稿內容雜訊很多，請主動去蕪存菁，不要逐字重寫。
-11. 只輸出 markdown，不要加前言、不要解釋你怎麼做的。
+2. 第一行標題格式固定為：# {date}｜<今日主題標題>
+3. `今日主題標題` 需要你根據內容自行生成，長度控制在 10-22 個中文字，直接點出當天最重要的市場主軸，不要寫成空泛標題，不要使用書名號。
+4. 第二段使用 `> ` blockquote 寫一段 120-180 字的「今日總覽」，先交代大盤主軸、風險焦點與最重要的市場變化。
+5. 接著輸出 `## 核心關鍵字`，列出 3-5 個最重要主題，每點只寫關鍵詞或短語。
+6. 接著輸出 `## 重點整理`，列出 4-6 點；每點使用 `### ` 小標，並用 2-4 句說明具體事實、因果與講者觀點。
+7. 若逐字稿內有明確數字、資產價格、經濟數據或產業指標，再輸出 `## 市場數據與動態`，以條列方式整理；若沒有明確數據，可省略此節。
+8. 最後一定要輸出 `## 市場觀察` 與 `## 後續關注` 兩節，各用 2-4 個條列說明。
+9. 請優先保留對投資判斷有用的內容，並清楚區分已發生的事實與講者的推論或預測。
+10. 請移除講者名稱、主持人口吻、對話輪次與人物標記，改寫成不帶講者識別的書面整理；只有在人物身分本身構成分析重點時才保留。
+11. 如果逐字稿內容雜訊很多，請主動去蕪存菁，不要逐字重寫。
+12. 只輸出 markdown，不要加前言、不要解釋你怎麼做的。
 
 資料日期：{date}
 資料標題：{title}
@@ -215,11 +216,25 @@ def note_files(config: Config) -> list[Path]:
     return sorted(config.ebook_dir.glob("note_*.md"))
 
 
+def note_link_label(note_file: Path) -> str:
+    fallback = note_file.stem.removeprefix("note_")
+    try:
+        with note_file.open(encoding="utf-8") as handle:
+            first_line = handle.readline().strip()
+    except OSError:
+        return fallback
+
+    if not first_line.startswith("# "):
+        return fallback
+
+    heading = first_line[2:].strip()
+    return heading or fallback
+
+
 def build_summary(config: Config) -> None:
     lines = ["# Summary", "", "- [首頁](./README.md)"]
     for note_file in note_files(config):
-        note_date = note_file.stem.removeprefix("note_")
-        lines.append(f"- [{note_date}](./{note_file.name})")
+        lines.append(f"- [{note_link_label(note_file)}](./{note_file.name})")
     (config.ebook_dir / "SUMMARY.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
@@ -247,8 +262,7 @@ def build_homepage(config: Config) -> None:
         lines.append("目前尚未產生任何每日筆記。")
     else:
         for note_file in notes:
-            note_date = note_file.stem.removeprefix("note_")
-            lines.append(f"- [{note_date}](./{note_file.name})")
+            lines.append(f"- [{note_link_label(note_file)}](./{note_file.name})")
     (config.ebook_dir / "README.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
