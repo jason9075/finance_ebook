@@ -1,0 +1,8 @@
+book/
+.direnv/
+.envrc.local
+.DS_Store
+result
+
+transcripts/**
+!transcripts/.keep
