@@ -31,7 +31,7 @@ REQUIRED_PROMPT_MARKERS = (
 )
 
 
-README_TEMPLATE = """# 財經逐字稿每日重點
+README_TEMPLATE = """# 財經每日重點
 
 這本 mdBook 由 `python -m finance_ebook` 自動產生。
 
@@ -48,7 +48,7 @@ mdbook serve
 
 ## 說明
 
-- 每篇 `note_YYYYMMDD.md` 對應一天的逐字稿重點。
+- 每篇 `note_YYYYMMDD.md` 對應一天的來源重點。
 - `SUMMARY.md` 會依日期自動更新。
 - 預設會跳過已存在的筆記；若要重跑已產生的檔案，加入 `--force`。
 - 預設 backend 為 `codex`，可用 `BACKEND` 切換為 `gemini`。
@@ -407,9 +407,9 @@ def build_summary(config: Config) -> None:
 def build_homepage(config: Config) -> None:
     notes = note_files(config)
     lines = [
-        "# 財經逐字稿每日重點",
+        "# 財經每日重點",
         "",
-        "這本 mdBook 由 `python -m finance_ebook` 自動整理每日逐字稿，並彙整成重點摘要。",
+        "這本 mdBook 由 `python -m finance_ebook` 自動整理每日資料，並彙整成重點摘要。",
         "",
         f"目前已產生 `{len(notes)}` 篇每日筆記。",
         "",
